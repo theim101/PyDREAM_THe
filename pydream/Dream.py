@@ -44,6 +44,11 @@ class Dream:
         Thinning rate for history to reduce storage requirements.  Every n-th iteration will be added to the history.
     snooker : float
         Probability of proposing a snooker update.  Default is .1.  To forego snooker updates, set to 0.
+    snooker_tol : float
+        Relative tolerance below which the snooker reference point z counts as identical to the current
+        point q0: ||q0 - z|| <= snooker_tol * max(1, ||q0||, ||z||). The snooker direction q0 - z is then
+        round-off noise and the move is skipped (proposal = q0), as pydream already does for z == q0
+        exactly. Default = 1e-8. Set to 0 for the original behaviour (exact equality only).
     p_gamma_unity : float
         Probability of proposing a point with gamma=unity (i.e. a point relatively far from the current point
         to enable jumping between disconnected modes).  Default = .2.
@@ -92,6 +97,7 @@ class Dream:
         zeta: float = 1e-12,
         history_thin: int = 10,
         snooker: float = .10,
+        snooker_tol: float = 1e-8,
         p_gamma_unity: float = .20,
         gamma_levels: int = 1,
         start_random: bool = True,
@@ -207,6 +213,7 @@ class Dream:
         self.DEpairs = np.linspace(1, DEpairs, num=DEpairs, dtype=int) #This is delta in original Matlab code
 
         self.snooker = snooker
+        self.snooker_tol = snooker_tol
         self.p_gamma_unity = p_gamma_unity
 
         #If no multitry requested, set value to 1, if requested without a value, set to 5, else set to the value passed
@@ -1003,6 +1010,22 @@ class Dream:
         else:
             return proposed_pts, snooker_logp, z
 
+    def snooker_degenerate(self, q0: np.ndarray, z: np.ndarray) -> bool:
+        """True if the snooker reference point z coincides with q0 up to round-off.
+
+        The history contains the past states of all chains, so z can be a stored copy of the current
+        state of a chain that has not moved (||q0 - z|| ~ 1e-11 after float round-off). The snooker
+        direction q0 - z is then numerical noise, and the Jacobian term
+        (d-1) * log(||q - z|| / ||q0 - z||) in the acceptance probability becomes very large
+        (e.g. +865 for d = 36), so that almost any proposal along the noise direction is accepted.
+        Such a z is treated like z == q0: no snooker move. See PYDREAM_BUGS_DOCUMENTATION.md, Bug 3.
+        """
+        q0 = np.asarray(q0, dtype=float).ravel()
+        z = np.asarray(z, dtype=float).ravel()
+        dist = np.linalg.norm(q0 - z)
+        scale = max(1.0, float(np.linalg.norm(q0)), float(np.linalg.norm(z)))
+        return bool(dist <= self.snooker_tol * scale)
+
     def snooker_update(self, n_proposed_pts: int, q0: np.ndarray) -> Tuple[Any, Any, Any]:
         """Generate a proposed point with snooker updating scheme.
 
@@ -1036,6 +1059,9 @@ class Dream:
 
         if n_proposed_pts > 1:
             D = [np.dot(proj_vec_diff[point], proj_vec_diff[point]) for point in range(len(proj_vec_diff))]
+            # z == q0 up to round-off: no snooker move for that point (D = 0 -> zP = 0)
+            D = [0 if self.snooker_degenerate(q0, sampled_history_pt[point]) else D[point]
+                 for point in range(n_proposed_pts)]
 
             #Orthogonal projection of chains_to_projected onto projection vector
             diff_chains_to_be_projected = [(chains_to_be_projected[point][0]-chains_to_be_projected[point][1]) for point in range(n_proposed_pts)]
@@ -1051,6 +1077,9 @@ class Dream:
 
         else:
             D = np.dot(proj_vec_diff, proj_vec_diff)
+            # z == q0 up to round-off: no snooker move (D = 0 -> zP = 0)
+            if self.snooker_degenerate(q0, sampled_history_pt[0]):
+                D = 0
 
             #Orthogonal projection of chains_to_projected onto projection vector
             diff_chains_to_be_projected = chains_to_be_projected[0]-chains_to_be_projected[1]
