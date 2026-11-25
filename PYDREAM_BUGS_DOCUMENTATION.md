@@ -1,6 +1,6 @@
 # PyDream Diagnostics and Bug Fix Report
 
-**Current Status:** All identified critical bugs have been **FIXED**. The codebase has been modernized and verified through unit tests and reproduction scripts. Bug 3 (snooker reference point equal to the current point up to round-off) was found and fixed on 2026-11-25. No further bugs are currently known.
+**Current Status:** All identified critical bugs have been **FIXED**. The codebase has been modernized and verified through unit tests and reproduction scripts. Bug 3 (snooker reference point equal to the current point up to round-off) and Bug 4 (nan acceptance ratio and wasted likelihood evaluation when the snooker move is void) were found and fixed on 2026-11-25. No further bugs are currently known.
 
 ---
 
@@ -51,7 +51,7 @@ The snooker reference point `z` is drawn from the history, which also contains t
 - **Action**: `z` counts as identical to `q0` if ‖q0 − z‖ ≤ `snooker_tol` · max(1, ‖q0‖, ‖z‖). Default `snooker_tol = 1e-8`, far above round-off (the observed case was ~3e-15 relative) and far below any genuine distance between history points.
 - **Action**: For such a `z`, `D` is set to 0, so the existing exact-equality branch applies: `zP = 0` and the proposal equals `q0` (no move). The Jacobian terms of the proposal and the current point then cancel, and the move counts neither as accepted nor as a change. In multi-try, only the affected trial points are frozen.
 - **Semantics**: Unchanged for every regular `z` (identical proposals and snooker log-probabilities; see the test below). The fix extends pydream's own treatment of `z == q0` to round-off copies, where the snooker line is undefined. `snooker_tol=0` restores the original behaviour. The option can be passed through `run_dream(..., snooker_tol=...)` (kwargs go to `Dream`).
-- **Not changed**: For an exact copy (‖q0 − z‖ = 0), the acceptance step in `astep` still computes `-inf - -inf`. This emits `RuntimeWarning: invalid value encountered in scalar subtract`, and `nan_to_num` turns the result into 0. Because the proposal equals `q0`, the outcome is "no move", as before; the warning is harmless.
+- **Not changed (at the time)**: For an exact copy (‖q0 − z‖ = 0), the acceptance step in `astep` still computed `-inf - -inf`, with a `RuntimeWarning` and a wasted likelihood evaluation. Fixed separately as Bug 4.
 
 ### Verification
 - `pydream/tests/test_snooker_degenerate.py` (does not need pysb), 5 tests:
@@ -62,6 +62,38 @@ The snooker reference point `z` is drawn from the history, which also contains t
   - in multi-try, only the degenerate trial point is frozen.
 - End-to-end: `run_dream` on a 10-d Gaussian (5 chains, `snooker=0.5`, 4000 iterations, with and without `multitry=3`) recovers the means (max error 0.14 / 0.31) and the standard deviations (ratio 0.90–1.09).
 - The pysb-based suite (`pydream/tests/test_dream.py`) could not be run because pysb was not installed in the test environment (`work3_14`).
+
+---
+
+## Fixed Bug 4: Void Snooker Move Gives a nan Acceptance Ratio and a Wasted Likelihood Evaluation
+
+### Symptom
+During DREAM(ZS) runs with `snooker > 0` (landfill model lin04, 37 parameters, 8 chains), the log repeatedly shows:
+```
+pydream/Dream.py:443: RuntimeWarning: invalid value encountered in scalar subtract
+  q_new = metrop_select(np.nan_to_num(total_proposed_logp - total_old_logp), q, q0)
+```
+The warning had been present in earlier versions too (before Bug 3 was fixed).
+
+### Root Cause
+The history stores **exact** copies of the chains' states (`record_history` of `q_new`, also when a proposal was rejected). A chain that has not moved for a while can draw its own current state as snooker reference point, `z == q0` bit for bit. This is not round-off.
+- `snooker_update` then returns `q0` itself (`D = 0` → `zP = 0`; since Bug 3 also for round-off copies).
+- In the single-try acceptance step, the Jacobian terms of the proposal and the current point are both `log(0)·(d−1) = -inf`. Their difference `-inf - (-inf)` is `nan`, which causes the warning; `nan_to_num` turns it into 0, so `q0` is "accepted" and nothing changes.
+- The outcome was therefore already correct ("no move"), but the proposal `q0` was still sent to the likelihood. For an expensive model that is a full model run for nothing (2.7 s per call in the landfill model).
+
+### Implementation of Fix
+- **Location**: `pydream/Dream.py`, `astep` (single-try branch).
+- **Action**: After the proposal is generated, `snooker_frozen = run_snooker and multitry == 1 and snooker_degenerate(q0, z)`. If true, the likelihood is not evaluated and the Metropolis test is skipped: `q_new = q0`, and `last_prior`/`last_like` are unchanged.
+- **Semantics**: Identical outcome to before ("no move"), assuming a deterministic likelihood. The only differences are that there is no warning and no likelihood call. History recording, current-position update and crossover adaptation proceed as for a rejected move, as before.
+- **Not changed**: Multi-try (`multitry > 1`). A frozen trial point there gets a snooker log-weight of `-inf` (weight 0) or a finite one (round-off case). It is handled by the existing weighting and does not produce `-inf - -inf` unless all trial points are frozen.
+
+### Verification
+- `pydream/tests/test_snooker_degenerate.py`, 3 new tests (8 in total):
+  - `astep` with `z == q0` exactly and with `z = q0 + 1e-12` returns `q0`, calls the likelihood 0 times, emits no `RuntimeWarning`, and keeps the prior and likelihood values;
+  - a regular snooker move still evaluates the likelihood once.
+  - The two frozen-move tests fail on the version before this fix.
+- End-to-end: `run_dream` on a 10-d Gaussian (5 chains, `snooker=0.5`, 4000 iterations, with and without `multitry=3`) runs without the warning (before: several) and recovers the means (max error 0.26 / 0.20) and the standard deviations (ratio 0.85–1.06).
+- The pysb-based suite (`pydream/tests/test_dream.py`) was again not run (pysb not installed in `work3_14`).
 
 ---
 

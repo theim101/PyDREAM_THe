@@ -365,8 +365,18 @@ class Dream:
                 self.last_prior, self.last_like = self.logp(q0)
                 self.last_logp = T*self.last_like + self.last_prior
 
+            # Snooker move with z equal to q0 (exactly or up to round-off, see snooker_degenerate):
+            # snooker_update returned q0 itself. The move is "no move"; skip the logp evaluation
+            # and the Metropolis test, whose Jacobian terms would both be log(0) = -inf (nan ratio).
+            # See PYDREAM_BUGS_DOCUMENTATION.md, Bug 4.
+            snooker_frozen = (run_snooker and self.multitry == 1
+                              and self.snooker_degenerate(q0, z[0] if isinstance(z, list) else z))
+
             #Evaluate logp(s)
-            if self.multitry == 1:
+            if snooker_frozen:
+                q = np.array(q0, copy=True)
+                q_logp = self.last_logp
+            elif self.multitry == 1:
                 q_prior, q_loglike_noT = self.logp(np.squeeze(proposed_pts))
                 q_logp_noT = q_prior + q_loglike_noT
                 q_logp = T*q_loglike_noT + q_prior
@@ -433,6 +443,8 @@ class Dream:
                 weight_reference = np.exp(total_reference_logp - max_logp)
                 q_new = metrop_select(np.nan_to_num(np.log(np.sum(weight_proposed)/np.sum(weight_reference))), q_proposal, q0)
 
+            elif snooker_frozen:
+                q_new = q0
             else:
                 if run_snooker:
                     total_proposed_logp = q_logp + snooker_logp_prop

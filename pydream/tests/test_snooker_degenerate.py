@@ -101,3 +101,51 @@ def test_multitry_only_degenerate_point_frozen(points, monkeypatch):
     np.testing.assert_array_equal(q[0], q0)
     assert np.linalg.norm(q[1] - q0) > 0
     assert np.linalg.norm(q[2] - q0) > 0
+
+
+# --- Bug 4: astep with an exact (or round-off) copy of q0 as snooker reference point ---
+
+def _astep_with_z(z_offset, monkeypatch):
+    """One astep with a forced snooker move whose reference point is q0 + z_offset.
+    Returns (q_new, number of likelihood calls, caught warnings)."""
+    import warnings
+
+    from pydream.core import _setup_mp_dream_pool
+
+    calls = []
+
+    def like(x):
+        calls.append(1)
+        return float(-0.5 * np.sum((x - 1500.0) ** 2) / 1e6)
+
+    lower = np.zeros(D)
+    param = SampledParam(uniform, loc=lower, scale=np.full(D, 3000.0))
+    step = Dream(model=Model(likelihood=like, sampled_parameters=[param]), save_history=False,
+                 crossover_burnin=100, adapt_crossover=False, snooker=1.0,
+                 start_random=False)
+    pool = _setup_mp_dream_pool(nchains=3, niterations=10, step_instance=step)
+    pool._initializer(*pool._initargs)
+    pool.terminate()
+
+    rng = np.random.default_rng(2)
+    q0 = rng.uniform(1, 3000, D)
+    far = [rng.uniform(1, 3000, D) for _ in range(2)]
+    mock_history(step, monkeypatch, [q0 + z_offset], far)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        q_new, prior, loglike = step.astep(q0=q0, last_logprior=0.0, last_loglike=-1.0)
+    return q0, q_new, len(calls), w, (prior, loglike)
+
+
+@pytest.mark.parametrize('z_offset', [0.0, 1e-12])
+def test_astep_frozen_snooker_no_eval_no_warning(z_offset, monkeypatch):
+    q0, q_new, ncalls, w, (prior, loglike) = _astep_with_z(z_offset, monkeypatch)
+    np.testing.assert_array_equal(q_new, q0)
+    assert ncalls == 0                                  # likelihood not evaluated
+    assert not [x for x in w if issubclass(x.category, RuntimeWarning)]
+    assert (prior, loglike) == (0.0, -1.0)              # state unchanged
+
+
+def test_astep_regular_snooker_evaluates(monkeypatch):
+    q0, q_new, ncalls, w, _ = _astep_with_z(500.0, monkeypatch)
+    assert ncalls == 1

@@ -60,3 +60,6 @@ pydream/
 - Bug 3 (2026-11-25): snooker reference point `z` equal to the current point up to
   round-off gave a huge Jacobian term and accepted bad moves; guarded with
   `snooker_tol` (default 1e-8).
+- Bug 4 (2026-11-25): a void snooker move (z = q0, exact or round-off) gave a nan
+  acceptance ratio (`RuntimeWarning` in `astep`) and a useless likelihood evaluation;
+  now skipped (single-try).
